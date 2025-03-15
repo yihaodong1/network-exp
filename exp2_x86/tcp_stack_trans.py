@@ -32,7 +32,7 @@ def client(ip, port):
     s.connect((ip, int(port)))
     
     for i in range(3):
-        new_data = data[i:] + data[:i+1]
+        new_data = data[i:] + data[:i]
         s.send(new_data.encode())
         print(s.recv(1000).decode())
         sleep(1)
