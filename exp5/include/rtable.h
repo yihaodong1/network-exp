@@ -16,7 +16,7 @@ typedef struct {
 	u32 gw;					// ip address of next hop (will be 0 if dest is in 
 							// the same network with iface)
 	int flags;				// flags (could be omitted here)
-	char if_name[16];		// name of the interface, e.g. r1-eth0
+	char if_name[16];		// name of the interface
 	iface_info_t *iface;	// pointer to the interface structure
 } rt_entry_t;
 
@@ -32,6 +32,8 @@ rt_entry_t *new_rt_entry(u32 dest, u32 mask, u32 gw, iface_info_t *iface);
 
 rt_entry_t *longest_prefix_match(u32 ip);
 
+void read_kernel_rtable(struct list_head *rtable);
 void load_rtable_from_kernel();
+void load_rtable(struct list_head *rtable);
 
 #endif

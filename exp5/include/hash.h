@@ -6,26 +6,25 @@
 #define HASH_8BITS 256
 #define HASH_16BITS 65536
 
-static inline u8 hash8(char *addr, int len)
+// the simplest hash functions, you can recreate the wheels as you wish
+
+static inline u8 hash8(char *buf, int len)
 {
 	u8 result = 0;
-	while (len >= 0) {
-		result ^= addr[--len];
-	}
+	for (int i = 0; i < len; i++)
+		result ^= buf[i];
 
 	return result;
 }
 
-static inline u16 hash16(char *addr, int len)
+static inline u16 hash16(char *buf, int len)
 {
 	u16 result = 0;
-	while (len >= 2) {
-		result ^= *(u8 *)(addr + len - 2);
-		len -= 2;
-	}
+	for (int i = 0; i < len / 2 * 2; i += 2)
+		result ^= *(u16 *)(buf + i);
 
-	if (len) 
-		result ^= (u8)(*addr);
+	if (len % 2)
+		result ^= (u8)(buf[len-1]);
 	
 	return result;
 }
