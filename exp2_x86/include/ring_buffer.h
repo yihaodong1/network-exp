@@ -5,10 +5,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <pthread.h>
 struct ring_buffer {
 	int size;
 	int head;		// read from head
 	int tail;		// write from tail
+	pthread_mutex_t lock; // lock for thread safety
 	char buf[0];
 };
 
@@ -19,6 +21,7 @@ static inline struct ring_buffer *alloc_ring_buffer(int size)
 	struct ring_buffer *rbuf = malloc(tot_size);
 	memset(rbuf, 0, tot_size);
 	rbuf->size = size + 1;
+	pthread_mutex_init(&rbuf->lock, NULL);
 
 	return rbuf;
 }
@@ -55,6 +58,7 @@ static inline int ring_buffer_full(struct ring_buffer *rbuf)
 
 static inline int read_ring_buffer(struct ring_buffer *rbuf, char *buf, int size)
 {
+	pthread_mutex_lock(&rbuf->lock);
 	int len = min(ring_buffer_used(rbuf), size);
 	if (len > 0) {
 		if (rbuf->head + len > rbuf->size) {
@@ -70,12 +74,14 @@ static inline int read_ring_buffer(struct ring_buffer *rbuf, char *buf, int size
 		rbuf->head = (rbuf->head + len) % (rbuf->size);
 	}
 
+	pthread_mutex_unlock(&rbuf->lock);
 	return len;
 }
 
 // rbuf should have enough space for buf
 static inline void write_ring_buffer(struct ring_buffer *rbuf, char *buf, int size)
 {
+	pthread_mutex_lock(&rbuf->lock);
 	assert(size > 0 && ring_buffer_free(rbuf) >= size);
 	int len = size;
 	if (rbuf->tail + len > rbuf->size) {
@@ -89,6 +95,7 @@ static inline void write_ring_buffer(struct ring_buffer *rbuf, char *buf, int si
 	}
 
 	rbuf->tail = (rbuf->tail + len) % (rbuf->size);
+	pthread_mutex_unlock(&rbuf->lock);
 }
 
 #endif

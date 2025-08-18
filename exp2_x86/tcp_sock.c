@@ -74,13 +74,30 @@ struct tcp_sock *alloc_tcp_sock()
 // decreased to zero.
 void free_tcp_sock(struct tcp_sock *tsk)
 {
-	fprintf(stdout, "TODO: implement %s please.\n", __FUNCTION__);
+	tsk->ref_cnt -= 1;
+	if (tsk->ref_cnt == 0) {
+		free_ring_buffer(tsk->rcv_buf);
+		free_wait_struct(tsk->wait_connect);
+		free_wait_struct(tsk->wait_accept);
+		free_wait_struct(tsk->wait_recv);
+		free_wait_struct(tsk->wait_send);
+		free(tsk);
+		log(INFO, "Do free tcp sock.");
+	}
 }
 
 // lookup tcp sock in established_table with key (saddr, daddr, sport, dport)
 struct tcp_sock *tcp_sock_lookup_established(u32 saddr, u32 daddr, u16 sport, u16 dport)
 {
-	fprintf(stdout, "TODO: implement %s please.\n", __FUNCTION__);
+	int value = tcp_hash_function(saddr, daddr, sport, dport);
+	struct list_head *list = &tcp_established_sock_table[value];
+
+	struct tcp_sock *tsk;
+	list_for_each_entry(tsk, list, hash_list) {
+		if (tsk->sk_sip == saddr && tsk->sk_dip == daddr &&
+				tsk->sk_sport == sport && tsk->sk_dport == dport)
+			return tsk;
+	}
 
 	return NULL;
 }
@@ -90,7 +107,14 @@ struct tcp_sock *tcp_sock_lookup_established(u32 saddr, u32 daddr, u16 sport, u1
 // In accordance with BSD socket, saddr is in the argument list, but never used.
 struct tcp_sock *tcp_sock_lookup_listen(u32 saddr, u16 sport)
 {
-	fprintf(stdout, "TODO: implement %s please.\n", __FUNCTION__);
+	int value = tcp_hash_function(0, 0, sport, 0);
+	struct list_head *list = &tcp_listen_sock_table[value];
+
+	struct tcp_sock *tsk;
+	list_for_each_entry(tsk, list, hash_list) {
+		if (tsk->sk_sport == sport)
+			return tsk;
+	}
 
 	return NULL;
 }
@@ -236,18 +260,52 @@ int tcp_sock_bind(struct tcp_sock *tsk, struct sock_addr *skaddr)
 //    means the connection is established.
 int tcp_sock_connect(struct tcp_sock *tsk, struct sock_addr *skaddr)
 {
-	fprintf(stdout, "TODO: implement %s please.\n", __FUNCTION__);
+	u32 ip = ntohl(skaddr->ip);
+	u16 port = ntohs(skaddr->port);
+	rt_entry_t *rt_entry = longest_prefix_match(ip);
+	if (!rt_entry) {
+		log(ERROR, "no route to server");
+		return -1;
+	}
 
-	return -1;
+	tsk->sk_sip = rt_entry->iface->ip; // local ip
+	int ret = tcp_sock_set_sport(tsk, 0);
+	if(ret < 0){
+		log(ERROR, "tcp_sock_set_sport failed.");
+		return ret;
+	}
+	tsk->sk_dip = ip; // remote ip
+	tsk->sk_dport = port; // remote port
+	tcp_set_state(tsk, TCP_SYN_SENT);
+	ret = tcp_hash(tsk);
+	if(ret < 0){
+		log(ERROR, "tcp_hash failed.");
+		return ret;
+	}
+	tcp_send_control_packet(tsk, TCP_SYN );
+	ret = sleep_on(tsk->wait_connect);
+	if(ret < 0){
+		log(ERROR, "tcp_sock_connect failed, wait_connect is dead.");
+		return ret;
+	}
+	log(INFO, "tcp connection established.");
+
+	return 0;
 }
 
 // set backlog (the maximum number of pending connection requst), switch the
 // TCP_STATE, and hash the tcp sock into listen_table
 int tcp_sock_listen(struct tcp_sock *tsk, int backlog)
 {
-	fprintf(stdout, "TODO: implement %s please.\n", __FUNCTION__);
+	tsk->backlog = backlog;
+	tcp_set_state(tsk, TCP_LISTEN);
+	int ret = tcp_hash(tsk);
+	if(ret < 0){
+		log(ERROR, "tcp_hash failed.");
+		return ret;
+	}
 
-	return -1;
+	return 0;
 }
 
 // check whether the accept queue is full
@@ -285,14 +343,60 @@ inline struct tcp_sock *tcp_sock_accept_dequeue(struct tcp_sock *tsk)
 // otherwise, sleep on the wait_accept for the incoming connection requests
 struct tcp_sock *tcp_sock_accept(struct tcp_sock *tsk)
 {
-	fprintf(stdout, "TODO: implement %s please.\n", __FUNCTION__);
+	while(list_empty(&tsk->accept_queue)) {
+		int ret = sleep_on(tsk->wait_accept);
+		if(ret < 0){
+			log(ERROR, "tcp_sock_accept failed, wait_accept is dead.");
+			return NULL;
+		}
+	}
+	
+	struct tcp_sock *new_tsk = tcp_sock_accept_dequeue(tsk);
+	log(INFO, "tcp sock accepted, sip="IP_FMT", sport=%hu, dip="IP_FMT", dport=%hu.",
+			HOST_IP_FMT_STR(new_tsk->sk_sip), new_tsk->sk_sport,
+			HOST_IP_FMT_STR(new_tsk->sk_dip), new_tsk->sk_dport);
+	return new_tsk;
 
-	return NULL;
 }
 
 // close the tcp sock, by releasing the resources, sending FIN/RST packet
 // to the peer, switching TCP_STATE to closed
 void tcp_sock_close(struct tcp_sock *tsk)
 {
-	fprintf(stdout, "TODO: implement %s please.\n", __FUNCTION__);
+	// TODO: Releasing resources? ..
+	tcp_send_control_packet(tsk, TCP_FIN | TCP_ACK);
+	if(tsk->state == TCP_ESTABLISHED)
+		tcp_set_state(tsk, TCP_FIN_WAIT_1);
+	else if(tsk->state == TCP_CLOSE_WAIT){
+		tcp_set_state(tsk, TCP_LAST_ACK);
+	}else{
+		log(ERROR, "state error\n");
+		exit(1);
+	}
+	// tcp_bind_unhash(tsk);
+	// tcp_unhash(tsk);
+}
+
+// 返回值：0表示读到流结尾，对方关闭连接；-1表示出现错误；正值表示读取的数据长度
+int tcp_sock_read(struct tcp_sock *tsk, char *buf, int len)
+{
+	while(ring_buffer_empty(tsk->rcv_buf)){
+		// NOTICE: at the end of trans, return 0 and break to close
+		if(tsk->state == TCP_CLOSE_WAIT)
+			break;
+		log(INFO, "tcp_sock_read, wait for data.");
+		sleep_on(tsk->wait_recv);
+	}
+	int res = read_ring_buffer(tsk->rcv_buf, buf, len);
+	return res;
+}
+// 返回值：-1表示出现错误；正值表示写入的数据长度
+int tcp_sock_write(struct tcp_sock *tsk, char *buf, int len)
+{
+	
+	// char packet[len + ETHER_HDR_SIZE + IP_BASE_HDR_SIZE + TCP_BASE_HDR_SIZE];
+	char *packet = malloc(len + ETHER_HDR_SIZE + IP_BASE_HDR_SIZE + TCP_BASE_HDR_SIZE);
+	memcpy(packet + ETHER_HDR_SIZE + IP_BASE_HDR_SIZE + TCP_BASE_HDR_SIZE, buf, len);
+	tcp_send_packet(tsk, packet, len + ETHER_HDR_SIZE + IP_BASE_HDR_SIZE + TCP_BASE_HDR_SIZE);
+	return len;
 }

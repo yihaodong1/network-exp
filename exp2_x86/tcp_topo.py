@@ -9,7 +9,7 @@ from mininet.net import Mininet
 from mininet.link import TCLink
 from mininet.cli import CLI
 
-script_deps = [ 'ethtool', 'arptables', 'iptables' ]
+script_deps = [ 'ethtool', 'arptables-nft', 'iptables' ]
 
 def check_scripts():
     dir = os.path.abspath(os.path.dirname(sys.argv[0]))
