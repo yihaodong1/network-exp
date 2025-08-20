@@ -6,13 +6,16 @@
 #include <stddef.h>
 
 struct tcp_timer {
-	int type;	// time-wait: 0		retrans: 1
+	int type;	// time-wait: 0		retrans: 1		persist:2
 	int timeout;	// in micro second
 	struct list_head list;
 	int enable;
 };
 
 struct tcp_sock;
+#define persisttimer_to_tcp_sock(t) \
+	(struct tcp_sock *)((char *)(t) - offsetof(struct tcp_sock, persist_timer))
+
 #define timewait_to_tcp_sock(t) \
 	(struct tcp_sock *)((char *)(t) - offsetof(struct tcp_sock, timewait))
 
@@ -31,5 +34,9 @@ void tcp_set_timewait_timer(struct tcp_sock *);
 void tcp_set_retrans_timer(struct tcp_sock *tsk);
 
 void tcp_unset_retrans_timer(struct tcp_sock *tsk);
+
+void tcp_set_persist_timer(struct tcp_sock *tsk);
+
+void tcp_unset_persist_timer(struct tcp_sock *tsk);
 
 #endif

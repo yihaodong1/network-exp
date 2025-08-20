@@ -77,5 +77,9 @@ void handle_tcp_packet(char *packet, struct iphdr *ip, struct tcphdr *tcp)
 
 	struct tcp_sock *tsk = tcp_sock_lookup(&cb);
 
+	// if(tsk == NULL)
+	// 	return;
+	pthread_mutex_lock(&tsk->sk_lock);
 	tcp_process(tsk, &cb, packet);
+	pthread_mutex_unlock(&tsk->sk_lock);
 }

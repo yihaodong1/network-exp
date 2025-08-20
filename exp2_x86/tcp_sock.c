@@ -63,6 +63,10 @@ struct tcp_sock *alloc_tcp_sock()
 	tsk->wait_recv = alloc_wait_struct();
 	tsk->wait_send = alloc_wait_struct();
 
+	pthread_mutex_init(&tsk->sk_lock, NULL);
+	pthread_mutex_init(&tsk->rcv_buf_lock, NULL);
+	pthread_mutex_init(&tsk->send_buf_lock, NULL);
+
 	return tsk;
 }
 
@@ -380,14 +384,18 @@ void tcp_sock_close(struct tcp_sock *tsk)
 // 返回值：0表示读到流结尾，对方关闭连接；-1表示出现错误；正值表示读取的数据长度
 int tcp_sock_read(struct tcp_sock *tsk, char *buf, int len)
 {
+	pthread_mutex_lock(&tsk->rcv_buf_lock);
 	while(ring_buffer_empty(tsk->rcv_buf)){
 		// NOTICE: at the end of trans, return 0 and break to close
 		if(tsk->state == TCP_CLOSE_WAIT)
 			break;
 		log(INFO, "tcp_sock_read, wait for data.");
+		pthread_mutex_unlock(&tsk->rcv_buf_lock);
 		sleep_on(tsk->wait_recv);
+		pthread_mutex_lock(&tsk->rcv_buf_lock);
 	}
 	int res = read_ring_buffer(tsk->rcv_buf, buf, len);
+	pthread_mutex_unlock(&tsk->rcv_buf_lock);
 	return res;
 }
 // 返回值：-1表示出现错误；正值表示写入的数据长度
@@ -397,6 +405,38 @@ int tcp_sock_write(struct tcp_sock *tsk, char *buf, int len)
 	// char packet[len + ETHER_HDR_SIZE + IP_BASE_HDR_SIZE + TCP_BASE_HDR_SIZE];
 	char *packet = malloc(len + ETHER_HDR_SIZE + IP_BASE_HDR_SIZE + TCP_BASE_HDR_SIZE);
 	memcpy(packet + ETHER_HDR_SIZE + IP_BASE_HDR_SIZE + TCP_BASE_HDR_SIZE, buf, len);
+	pthread_mutex_lock(&tsk->sk_lock);
+	while (!tcp_tx_window_test(tsk)) {
+		// 如果发送窗口不足，先释放锁，再等待wait_send信号激活
+		pthread_mutex_unlock(&tsk->sk_lock);
+		log(INFO, "sleep on wait_send, wait for send window.");
+		sleep_on(tsk->wait_send);
+		pthread_mutex_lock(&tsk->sk_lock);
+	}
 	tcp_send_packet(tsk, packet, len + ETHER_HDR_SIZE + IP_BASE_HDR_SIZE + TCP_BASE_HDR_SIZE);
+	pthread_mutex_unlock(&tsk->sk_lock);
 	return len;
+}
+
+
+#define TCP_MSS (ETH_FRAME_LEN - ETHER_HDR_SIZE - IP_BASE_HDR_SIZE - TCP_BASE_HDR_SIZE)
+
+// 使用tsk->snd_una, tsk->snd_wnd, tsk->snd_nxt计算剩余窗口大小，如果大于TCP_MSS，
+// 则返回1，否则返回0
+int tcp_tx_window_test(struct tcp_sock *tsk)
+{
+	u32 snd_una = tsk->snd_una;
+	u32 snd_wnd = tsk->snd_wnd;
+	u32 snd_nxt = tsk->snd_nxt;
+
+	if (snd_wnd + snd_una - snd_nxt > TCP_MSS){
+		log(INFO, "tcp_tx_window_test: snd_wnd=%u, snd_una=%u, snd_nxt=%u, win size=%u",
+			snd_wnd, snd_una, snd_nxt, snd_wnd + snd_una - snd_nxt);
+		return 1;
+	}
+	else{
+		log(INFO, "win full, tcp_tx_window_test: snd_wnd=%u, snd_una=%u, snd_nxt=%u, win size=%u",
+			snd_wnd, snd_una, snd_nxt, snd_wnd + snd_una - snd_nxt);
+		return 0;
+	}
 }

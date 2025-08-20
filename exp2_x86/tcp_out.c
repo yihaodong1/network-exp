@@ -24,6 +24,52 @@ static void tcp_init_hdr(struct tcphdr *tcp, u16 sport, u16 dport, u32 seq, u32 
 	tcp->rwnd = htons(rwnd);
 }
 
+/*
+仿照tcp_send_packet函数，发送probe报文。几处改动：
+1. 发送的序列号设置为一个已经ACK过的序列号（比如tsk->snd_una - 1）
+2. 不需要更新snd_nxt
+3. 不需要设置重传相关内容
+4. TCP负载为一个任意的字节
+*/
+void tcp_send_probe_packet(struct tcp_sock *tsk) 
+{
+	log(INFO, "send probe packet");
+	int len = 1 + ETHER_HDR_SIZE + IP_BASE_HDR_SIZE + TCP_BASE_HDR_SIZE;
+	// packet would be free by other func
+	char *packet = malloc(len);
+	if(packet == NULL) {
+		log(ERROR, "malloc tcp probe packet failed.");
+		return;
+	}
+	// one random payload
+	packet[len - 1] = 'a';
+	struct iphdr *ip = packet_to_ip_hdr(packet);
+	struct tcphdr *tcp = (struct tcphdr *)((char *)ip + IP_BASE_HDR_SIZE);
+
+	int ip_tot_len = len - ETHER_HDR_SIZE;
+	int tcp_data_len = ip_tot_len - IP_BASE_HDR_SIZE - TCP_BASE_HDR_SIZE;
+
+	u32 saddr = tsk->sk_sip;
+	u32	daddr = tsk->sk_dip;
+	u16 sport = tsk->sk_sport;
+	u16 dport = tsk->sk_dport;
+
+	// NOTE: use an already ACKed seq
+	u32 seq = tsk->snd_una - 1;
+
+	u32 ack = tsk->rcv_nxt;
+	u16 rwnd = tsk->rcv_wnd;
+
+	tcp_init_hdr(tcp, sport, dport, seq, ack, TCP_PSH|TCP_ACK, rwnd);
+	ip_init_hdr(ip, saddr, daddr, ip_tot_len, IPPROTO_TCP); 
+
+	tcp->checksum = tcp_checksum(ip, tcp);
+
+	ip->checksum = ip_checksum(ip);
+
+
+	ip_send_packet(packet, len);
+}
 // send a tcp packet
 //
 // Given that the payload of the tcp packet has been filled, initialize the tcp 

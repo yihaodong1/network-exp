@@ -64,6 +64,9 @@ struct tcp_sock {
 	// tcp timer used during TCP_TIME_WAIT state
 	struct tcp_timer timewait;
 
+	// tcp persistent timer
+	struct tcp_timer persist_timer;
+
 	// used for timeout retransmission
 	struct tcp_timer retrans_timer;
 
@@ -110,6 +113,21 @@ struct tcp_sock {
 
 	// slow start threshold
 	u32 ssthresh;
+	// 保护snd_una等核心参数
+	// 收包时：在tcp_process调用之前上锁，之后解锁。这样整个收包过程对socket参数的更改都是安全的。
+	// 发包时：在tcp_send_packet调用之前上锁，之后解锁。这里由于每个人实现不一样，
+	// 加锁位置不一定一样，比如在调用`tcp_send_packet之前，用tcp_tx_window_test检查发送窗口，
+	// 那么应该在tcp_tx_window_test之前上锁。
+	pthread_mutex_t sk_lock;
+
+	// 保护struct ring_buffer *rcv_buf
+	// 每次访问rcv_buf时
+	pthread_mutex_t rcv_buf_lock;
+
+	// 保护struct list_head send_buf;
+	// 每次访问send_buf时
+	pthread_mutex_t send_buf_lock;
+
 };
 
 void tcp_set_state(struct tcp_sock *tsk, int state);
@@ -131,6 +149,7 @@ void tcp_send_reset(struct tcp_cb *cb);
 
 void tcp_send_control_packet(struct tcp_sock *tsk, u8 flags);
 void tcp_send_packet(struct tcp_sock *tsk, char *packet, int len);
+void tcp_send_probe_packet(struct tcp_sock *tsk);
 int tcp_send_data(struct tcp_sock *tsk, char *buf, int len);
 
 void tcp_process(struct tcp_sock *tsk, struct tcp_cb *cb, char *packet);
@@ -145,5 +164,6 @@ void tcp_sock_close(struct tcp_sock *tsk);
 
 int tcp_sock_read(struct tcp_sock *tsk, char *buf, int len);
 int tcp_sock_write(struct tcp_sock *tsk, char *buf, int len);
+int tcp_tx_window_test(struct tcp_sock *tsk);
 
 #endif

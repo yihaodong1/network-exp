@@ -11,8 +11,21 @@
 // if the snd_wnd before updating is zero, notify tcp_sock_send (wait_send)
 static inline void tcp_update_window(struct tcp_sock *tsk, struct tcp_cb *cb)
 {
+	int old_test_res = tcp_tx_window_test(tsk);
 	u16 old_snd_wnd = tsk->snd_wnd;
 	tsk->snd_wnd = cb->rwnd;
+	tsk->snd_una = cb->ack;
+	tsk->adv_wnd = cb->rwnd;
+	tsk->cwnd = 0x7f7f7f7f;
+	int new_test_res = tcp_tx_window_test(tsk);
+	log(INFO, "tcp_tx_win_res:%d new_res: %d", old_test_res, new_test_res);
+	if(old_test_res == 0 && new_test_res == 1){
+		wake_up(tsk->wait_send);
+		log(INFO, "wake up wait_send");
+	}
+	if(new_test_res == 0){
+		tcp_set_persist_timer(tsk);
+	}
 	if (old_snd_wnd == 0)
 		wake_up(tsk->wait_send);
 }
@@ -108,14 +121,42 @@ void tcp_process(struct tcp_sock *tsk, struct tcp_cb *cb, char *packet)
 		}
 	}
 	if(cb->payload && cb->pl_len){
-		write_ring_buffer(tsk->rcv_buf, cb->payload, cb->pl_len);
-		wake_up(tsk->wait_recv);
+		if(tsk->rcv_nxt == cb->seq){
+			pthread_mutex_lock(&tsk->rcv_buf_lock);
+			write_ring_buffer(tsk->rcv_buf, cb->payload, cb->pl_len);
+			pthread_mutex_unlock(&tsk->rcv_buf_lock);
+			wake_up(tsk->wait_recv);
+			flags = TCP_ACK;
+			// NOTE: important!
+			// log(INFO, "rcv_nxt: %u, seq: %u", tsk->rcv_nxt, cb->seq);
+			// tsk->rcv_nxt = cb->seq_end;
+			
+		}
 	}
 	tsk->sk_sip = cb->daddr;
 	tsk->sk_sport = cb->dport;
 	tsk->sk_dip = cb->saddr;
 	tsk->sk_dport = cb->sport;
-	tsk->rcv_nxt = cb->seq_end;
+	pthread_mutex_lock(&tsk->rcv_buf_lock);
+	tsk->rcv_wnd = ring_buffer_free(tsk->rcv_buf);
+	pthread_mutex_unlock(&tsk->rcv_buf_lock);
+	// NOTE: important!
+	if(tsk->rcv_nxt == 0)
+		tsk->rcv_nxt = cb->seq_end; // first packet, set rcv_nxt
+	else if(tsk->rcv_nxt == cb->seq)
+		tsk->rcv_nxt = cb->seq_end; // in order, set rcv_nxt
+	// else if(tsk->state != TCP_LISTEN){// avoid when tcp connect close, the listen would send useless ack
+	else if(less_or_equal_32b(cb->seq_end, tsk->rcv_nxt)){
+		// keep alive
+		log(INFO, "keep alive");
+		flags = TCP_ACK; 
+	}else if(less_than_32b(tsk->rcv_nxt, cb->seq)){
+		// out of order
+		flags = TCP_ACK;
+	}else {
+		log(ERROR, "should not reach here");
+	}
+	// }
 	if(flags)
 		tcp_send_control_packet(tsk, flags);
 }
