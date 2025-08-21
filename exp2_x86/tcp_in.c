@@ -136,7 +136,7 @@ void tcp_process(struct tcp_sock *tsk, struct tcp_cb *cb, char *packet)
 			tcp_set_state(tsk, TCP_CLOSE_WAIT);
 			// NOTICE: at the end of trans, wake up wait_recv and close
 			wake_up(tsk->wait_recv);
-			// tsk->rcv_nxt += 1;
+			tsk->rcv_nxt += 1;
 		}
 		else if(tsk->state == TCP_FIN_WAIT_2){
 			tcp_set_timewait_timer(tsk);
