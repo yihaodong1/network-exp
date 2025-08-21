@@ -7,7 +7,7 @@
 #include "log.h"
 
 static struct list_head timer_list;
-static pthread_mutex_t timer_list_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t timer_list_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /*
 1. 如果已经启用，则直接退出
@@ -52,6 +52,74 @@ void tcp_unset_persist_timer(struct tcp_sock *tsk)
 	// pthread_mutex_unlock(&timer_list_lock);
 }
 
+/*
+1. 如果已经启用，则更新超时时间为当前的RTO后退出
+2. 创建定时器，设置各个成员变量，初始RTO为TCP_RETRANS_INTERVAL_INITIAL。
+3. 增加tsk的引用计数，将定时器加入timer_list末尾
+*/
+void tcp_set_retrans_timer(struct tcp_sock *tsk)
+{
+	log(INFO, "set retrans timer");
+	pthread_mutex_lock(&timer_list_lock);
+	if(tsk->retrans_timer.enable) {
+		tsk->retrans_timer.timeout = tsk->retrans_timer.rto;
+		pthread_mutex_unlock(&timer_list_lock);
+		return;
+	}
+	tsk->ref_cnt += 1; // increase ref_cnt to avoid freeing the tcp sock
+	tsk->retrans_timer.enable = 1;
+	tsk->retrans_timer.type = 1; // retrans
+	tsk->retrans_timer.timeout = TCP_RETRANS_INTERVAL_INITIAL;
+	tsk->retrans_timer.rto = TCP_RETRANS_INTERVAL_INITIAL;
+	list_add_tail(&tsk->retrans_timer.list, &timer_list);
+	pthread_mutex_unlock(&timer_list_lock);
+}
+
+/*
+1. 如果已经禁用，不做任何事
+2. 调用free_tcp_sock减少tsk引用计数，并从链表中移除timer
+*/
+void tcp_unset_retrans_timer(struct tcp_sock *tsk)
+{
+	log(INFO, "unset retrans timer");
+	if(!tsk->retrans_timer.enable) {
+		return;
+	}
+	free_tcp_sock(tsk);
+	list_delete_entry(&tsk->retrans_timer.list);
+	tsk->retrans_timer.enable = 0;
+}
+
+/*
+1. 确认定时器是启用状态
+2. 如果发送队列为空，则删除定时器，并且唤醒发送数据的进程。
+否则重置计时器，包括timeout和重传计数。
+
+注意调用这个函数之前，需要完成对发送队列的更新。
+*/
+void tcp_update_retrans_timer(struct tcp_sock *tsk)
+{
+	log(INFO, "update retrans timer");
+	pthread_mutex_lock(&timer_list_lock);
+	if(!tsk->retrans_timer.enable) {
+		pthread_mutex_unlock(&timer_list_lock);
+		return;
+	}
+	pthread_mutex_lock(&tsk->send_buf_lock);
+	if(list_empty(&tsk->send_buf)) {
+		tcp_unset_retrans_timer(tsk);
+		wake_up(tsk->wait_send);
+		pthread_mutex_unlock(&tsk->send_buf_lock);
+		pthread_mutex_unlock(&timer_list_lock);
+		return;
+	}
+	pthread_mutex_unlock(&tsk->send_buf_lock);
+	tsk->retrans_timer.rto = TCP_RETRANS_INTERVAL_INITIAL;
+	tsk->retrans_timer.timeout = tsk->retrans_timer.rto;
+	tsk->retrans_timer.retrans_count = 0;
+	pthread_mutex_unlock(&timer_list_lock);
+}
+
 // scan the timer_list, find the tcp sock which stays for at 2*MSL, release it
 void tcp_scan_timer_list()
 {
@@ -72,6 +140,25 @@ void tcp_scan_timer_list()
 						tcp_unhash(tsk);
 						break;
 					case 1:// retrans
+					 	tsk = retranstimer_to_tcp_sock(pos);
+						pos->retrans_count++;
+						if(pos->retrans_count > TCP_RETRANS_MAX_COUNT) {
+							wake_up(tsk->wait_accept);
+							wake_up(tsk->wait_send);
+							wake_up(tsk->wait_recv);
+							wake_up(tsk->wait_connect);
+							// TODO: need to set cb to use tcp_send_reset
+							// tcp_send_reset(&tsk->cb);
+							tcp_unset_retrans_timer(tsk);
+							tcp_bind_unhash(tsk);
+							tcp_unhash(tsk);
+							log(INFO, "exceed TCP_RETRANS_MAX_COUNT, drop packet");
+						}else{
+							tcp_retrans_send_buffer(tsk);
+							pos->rto *= 2;
+							pos->timeout = pos->rto;
+						}
+						log(INFO, "retrans timer timeout, retrans_count=%d, rto=%u", pos->retrans_count, pos->rto);
 						break;
 					case 2:// persist
 						pos->timeout = TCP_RETRANS_INTERVAL_INITIAL;

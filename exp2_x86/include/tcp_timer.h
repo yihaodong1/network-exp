@@ -4,12 +4,15 @@
 #include "list.h"
 
 #include <stddef.h>
+#include <pthread.h>
 
 struct tcp_timer {
 	int type;	// time-wait: 0		retrans: 1		persist:2
 	int timeout;	// in micro second
 	struct list_head list;
 	int enable;
+	int rto; // for retrans timer
+	int retrans_count; // for retrans timer
 };
 
 struct tcp_sock;
@@ -25,6 +28,7 @@ struct tcp_sock;
 #define TCP_MSL			1000000
 #define TCP_TIMEWAIT_TIMEOUT	(2 * TCP_MSL)
 #define TCP_RETRANS_INTERVAL_INITIAL 200000
+#define TCP_RETRANS_MAX_COUNT 3
 
 // the thread that scans timer_list periodically
 void *tcp_timer_thread(void *arg);
@@ -35,8 +39,11 @@ void tcp_set_retrans_timer(struct tcp_sock *tsk);
 
 void tcp_unset_retrans_timer(struct tcp_sock *tsk);
 
+void tcp_update_retrans_timer(struct tcp_sock *tsk);
+
 void tcp_set_persist_timer(struct tcp_sock *tsk);
 
 void tcp_unset_persist_timer(struct tcp_sock *tsk);
 
+extern pthread_mutex_t timer_list_lock;
 #endif

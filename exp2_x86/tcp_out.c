@@ -101,6 +101,11 @@ void tcp_send_packet(struct tcp_sock *tsk, char *packet, int len)
 
 	tsk->snd_nxt += tcp_data_len;
 
+
+	// add packet first, ip_send_packet will release packet
+	tcp_set_retrans_timer(tsk);
+	tcp_send_buffer_add_packet(tsk, packet, len);
+
 	ip_send_packet(packet, len);
 }
 
@@ -131,6 +136,13 @@ void tcp_send_control_packet(struct tcp_sock *tsk, u8 flags)
 
 	if (flags & (TCP_SYN|TCP_FIN))
 		tsk->snd_nxt += 1;
+
+
+	if (flags & (TCP_SYN|TCP_FIN)){
+		// add packet first, ip_send_packet will release packet
+		tcp_set_retrans_timer(tsk);
+		tcp_send_buffer_add_packet(tsk, packet, pkt_size);
+	}
 
 	ip_send_packet(packet, pkt_size);
 }

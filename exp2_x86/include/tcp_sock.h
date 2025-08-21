@@ -130,6 +130,20 @@ struct tcp_sock {
 
 };
 
+struct send_buffer_entry{
+	struct list_head list;
+	char *packet;
+	u32 len;
+};
+
+struct recv_ofo_buf_entry{
+	struct list_head list;
+	char *packet;
+	int len;
+	u32 seq; // the sequence number of the packet
+	u32 seq_end;
+};
+
 void tcp_set_state(struct tcp_sock *tsk, int state);
 
 int tcp_sock_accept_queue_full(struct tcp_sock *tsk);
@@ -165,5 +179,11 @@ void tcp_sock_close(struct tcp_sock *tsk);
 int tcp_sock_read(struct tcp_sock *tsk, char *buf, int len);
 int tcp_sock_write(struct tcp_sock *tsk, char *buf, int len);
 int tcp_tx_window_test(struct tcp_sock *tsk);
+
+void tcp_send_buffer_add_packet(struct tcp_sock *tsk, char *packet, int len);
+int tcp_update_send_buffer(struct tcp_sock *tsk, u32 ack);
+int tcp_retrans_send_buffer(struct tcp_sock *tsk);
+int tcp_recv_ofo_buffer_add_packet(struct tcp_sock *tsk, struct tcp_cb *cb);
+int tcp_move_recv_ofo_buffer(struct tcp_sock *tsk);
 
 #endif

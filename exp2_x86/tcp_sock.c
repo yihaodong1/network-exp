@@ -55,6 +55,8 @@ struct tcp_sock *alloc_tcp_sock()
 	init_list_head(&tsk->list);
 	init_list_head(&tsk->listen_queue);
 	init_list_head(&tsk->accept_queue);
+	init_list_head(&tsk->send_buf);
+	init_list_head(&tsk->rcv_ofo_buf);
 
 	tsk->rcv_buf = alloc_ring_buffer(tsk->rcv_wnd);
 
@@ -280,6 +282,8 @@ int tcp_sock_connect(struct tcp_sock *tsk, struct sock_addr *skaddr)
 	}
 	tsk->sk_dip = ip; // remote ip
 	tsk->sk_dport = port; // remote port
+	tsk->iss = tcp_new_iss();
+	tsk->snd_nxt = tsk->iss;
 	tcp_set_state(tsk, TCP_SYN_SENT);
 	ret = tcp_hash(tsk);
 	if(ret < 0){
@@ -439,4 +443,168 @@ int tcp_tx_window_test(struct tcp_sock *tsk)
 			snd_wnd, snd_una, snd_nxt, snd_wnd + snd_una - snd_nxt);
 		return 0;
 	}
+}
+
+/*
+创建send_buffer_entry加入send_buf尾部
+
+注意上锁，后面不再强调。
+*/
+void tcp_send_buffer_add_packet(struct tcp_sock *tsk, char *packet, int len)
+{
+	pthread_mutex_lock(&tsk->send_buf_lock);
+	struct send_buffer_entry *entry = malloc(sizeof(struct send_buffer_entry));
+	entry->packet = malloc(len);
+	memcpy(entry->packet, packet, len);
+	entry->len = len;
+	list_add_tail(&entry->list, &tsk->send_buf);
+	pthread_mutex_unlock(&tsk->send_buf_lock);
+}
+
+/*
+基于收到的ACK包，遍历发送队列，将已经接收的数据包从队列中移除
+
+提取报文的tcp头可以使用packet_to_tcp_hdr，注意报文中的字段是大端序
+
+注意上锁，后面不再强调。
+*/
+int tcp_update_send_buffer(struct tcp_sock *tsk, u32 ack)
+{
+	pthread_mutex_lock(&tsk->send_buf_lock);
+	u8 flag = 0;
+	struct send_buffer_entry *pos, *q;
+	list_for_each_entry_safe(pos, q, &tsk->send_buf, list){
+		struct tcphdr *tcp = packet_to_tcp_hdr(pos->packet);
+		u32 seq_end = ntohl(tcp->seq) + pos->len - ETHER_HDR_SIZE - IP_BASE_HDR_SIZE - TCP_HDR_SIZE(tcp);
+		if(seq_end <= ack){
+			list_delete_entry(&pos->list);
+			init_list_head(&pos->list);
+			free(pos->packet);
+			free(pos);
+			flag = 1;
+			log(INFO, "update_send_buffer seq: %u, seq_end: %u, ack: %u", ntohl(tcp->seq), seq_end, ack);
+		}else{
+			// the insert order is from small to big
+			// so can end early
+			break;
+		}
+	}
+	pthread_mutex_unlock(&tsk->send_buf_lock);
+	return flag;
+}
+
+/*
+获取重传队列第一个包，修改ack号和checksum并通过ip_send_packet发送。
+
+注意不要更新snd_nxt之类的参数，这是一个独立的重传报文。
+ip_send_packet会释放传入的指针，因而需要拷贝需要重传的报文。
+
+注意上锁，后面不再强调。
+*/
+int tcp_retrans_send_buffer(struct tcp_sock *tsk)
+{
+	log(INFO, "retrans");
+	pthread_mutex_lock(&tsk->send_buf_lock);
+	if(!list_empty(&tsk->send_buf)) {
+		struct send_buffer_entry *pos = list_entry(tsk->send_buf.next, struct send_buffer_entry, list);
+		char *packet = malloc(pos->len);
+		memcpy(packet, pos->packet, pos->len);
+		ip_send_packet(packet, pos->len);
+	}
+	pthread_mutex_unlock(&tsk->send_buf_lock);
+	return 1;
+}
+
+/*
+1. 创建recv_ofo_buf_entry
+2. 用list_for_each_entry_safe遍历rcv_ofo_buf，将表项插入合适的位置。
+如果发现了重复数据包，则丢弃当前数据。
+3. 调用tcp_move_recv_ofo_buffer执行报文上送
+
+返回1表示rcv_nxt有变化，返回0表示没有
+*/
+int tcp_recv_ofo_buffer_add_packet(struct tcp_sock *tsk, struct tcp_cb *cb)
+{
+	struct recv_ofo_buf_entry *pos = list_entry(tsk->rcv_ofo_buf.next, struct recv_ofo_buf_entry, list), *q;
+	struct recv_ofo_buf_entry *new = malloc(sizeof(struct recv_ofo_buf_entry));
+	new->seq = cb->seq;
+	new->seq_end = cb->seq_end;
+	new->len = cb->pl_len;
+	new->packet = malloc(cb->pl_len);
+	u8 flag = 0;
+	memcpy(new->packet, cb->payload, cb->pl_len);
+	if(list_empty(&tsk->rcv_ofo_buf)) {
+
+		list_add_tail(&new->list, &tsk->rcv_ofo_buf);
+		log(INFO, "add tail %u-%u", cb->seq, cb->seq_end);
+		flag |= 1;
+	}else if(cb->seq_end <= pos->seq){
+		list_add_head(&new->list, &tsk->rcv_ofo_buf);
+		log(INFO, "add head %u-%u", cb->seq, cb->seq_end);
+		flag |= 1;
+	}else{
+		list_for_each_entry_safe(pos, q, &tsk->rcv_ofo_buf, list) {
+			if(pos->seq == cb->seq && pos->seq_end == cb->seq_end)
+				break;
+			if(pos->seq_end <= cb->seq && 
+				(q->seq >= cb->seq_end || &q->list == &tsk->rcv_ofo_buf)) {
+				list_insert(&new->list, &pos->list, &q->list);
+				log(INFO, "%u insert %u-%u  %u", pos->seq_end, cb->seq, cb->seq_end, q->seq);
+				flag |= 1;
+				break;
+			}
+		}
+	}
+	if(!flag){
+		free(new->packet);
+		free(new);
+		log(INFO, "insert recv_ofo_buffer failed");
+		return 0;
+	}else
+		return tcp_move_recv_ofo_buffer(tsk);
+}
+
+/*
+遍历rcv_ofo_buf，将所有有序的（序列号等于tsk->rcv_nxt）的报文送入接收队列（tsk->rcv_buf）
+更新rcv_nxt, rcv_wnd并唤醒接收线程(wait_recv)
+
+如果接收队列已满，应当退出函数，而非等待。
+
+返回1表示rcv_nxt有变化，返回0表示没有
+*/
+int tcp_move_recv_ofo_buffer(struct tcp_sock *tsk)
+{
+	// NOTE: no need to aquire the lock, as this func is called 
+	// by tcp_recv_ofo_buffer_add_packet, and the caller already
+	// acquire the lock
+	u8 flag = 0;
+	struct recv_ofo_buf_entry *pos, *q;
+	list_for_each_entry_safe(pos, q, &tsk->rcv_ofo_buf, list) {
+		pthread_mutex_lock(&tsk->rcv_buf_lock);
+		if(ring_buffer_full(tsk->rcv_buf)){
+			pthread_mutex_unlock(&tsk->rcv_buf_lock);
+			break;
+		}
+		tsk->rcv_wnd = ring_buffer_free(tsk->rcv_buf);
+		pthread_mutex_unlock(&tsk->rcv_buf_lock);
+		log(INFO,"pos->seq: %u, tsk->rcv_nxt: %u", pos->seq, tsk->rcv_nxt);
+
+		// if(pos->seq <= tsk->rcv_nxt && pos->seq_end > tsk->rcv_nxt) {
+		if(pos->seq == tsk->rcv_nxt ) {
+			list_delete_entry(&pos->list);
+			init_list_head(&pos->list);
+
+			pthread_mutex_lock(&tsk->rcv_buf_lock);
+			write_ring_buffer(tsk->rcv_buf, pos->packet, pos->len);
+			pthread_mutex_unlock(&tsk->rcv_buf_lock);
+
+			wake_up(tsk->wait_recv);
+			log(INFO, "rcv_nxt: %u", tsk->rcv_nxt);
+			tsk->rcv_nxt = pos->seq_end;
+			free(pos->packet);
+			free(pos);
+			flag = 1;
+		}
+	}
+	return flag;
 }

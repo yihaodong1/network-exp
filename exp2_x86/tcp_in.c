@@ -87,6 +87,7 @@ void tcp_process(struct tcp_sock *tsk, struct tcp_cb *cb, char *packet)
 				pthread_mutex_unlock(&timer_list_lock);
 				tcp_set_state(tsk, TCP_ESTABLISHED);
 				wake_up(tsk->wait_connect);
+				tsk->rcv_nxt = cb->seq_end;// first packet
 				flags = TCP_ACK;
 			}
 		}
@@ -116,7 +117,7 @@ void tcp_process(struct tcp_sock *tsk, struct tcp_cb *cb, char *packet)
 
 			tcp_set_state(tsk, TCP_CLOSED);
 			tcp_unhash(tsk);
-		}else if(tsk->state == TCP_FIN_WAIT_1){
+		}else if(tsk->state == TCP_FIN_WAIT_1 && tsk->snd_nxt == cb->ack){
 			// close the retrans of fin
 			pthread_mutex_lock(&timer_list_lock);
 			tcp_unset_retrans_timer(tsk);
@@ -129,63 +130,35 @@ void tcp_process(struct tcp_sock *tsk, struct tcp_cb *cb, char *packet)
 	}
 	
 	if(cb->flags & TCP_FIN) {
-		if(tsk->state == TCP_ESTABLISHED){
+		// TODO:  && tsk->rcv_nxt == cb->seq
+		if(tsk->state == TCP_ESTABLISHED&& tsk->rcv_nxt == cb->seq){
 			flags = TCP_ACK;
 			tcp_set_state(tsk, TCP_CLOSE_WAIT);
 			// NOTICE: at the end of trans, wake up wait_recv and close
 			wake_up(tsk->wait_recv);
+			// tsk->rcv_nxt += 1;
 		}
 		else if(tsk->state == TCP_FIN_WAIT_2){
 			tcp_set_timewait_timer(tsk);
 			tcp_set_state(tsk, TCP_TIME_WAIT);
+			tsk->rcv_nxt += 1;
 			flags = TCP_ACK;
 		}
 	}
 	if(cb->payload && cb->pl_len){
-		// if(tsk->rcv_nxt == cb->seq){
-		// 	pthread_mutex_lock(&tsk->rcv_buf_lock);
-		// 	write_ring_buffer(tsk->rcv_buf, cb->payload, cb->pl_len);
-		// 	pthread_mutex_unlock(&tsk->rcv_buf_lock);
-		// 	wake_up(tsk->wait_recv);
-		// 	flags = TCP_ACK;
-		// 	// NOTE: important!
-		// 	// log(INFO, "rcv_nxt: %u, seq: %u", tsk->rcv_nxt, cb->seq);
-		// 	// tsk->rcv_nxt = cb->seq_end;
-			
-		// }
-		tcp_recv_ofo_buffer_add_packet(tsk, cb);
-	}
-	if(tsk->rcv_nxt == 0)
-		tsk->rcv_nxt = cb->seq_end; // first packet, set rcv_nxt
-	else if(tsk->rcv_nxt == cb->seq)
-	;
-	// 	tsk->rcv_nxt = cb->seq_end; // in order, set rcv_nxt
-	// // else if(tsk->state != TCP_LISTEN){// avoid when tcp connect close, the listen would send useless ack
-	else if(less_or_equal_32b(cb->seq_end, tsk->rcv_nxt)){
-	// if(less_or_equal_32b(cb->seq_end, tsk->rcv_nxt)){
-		if(tsk->state != TCP_LISTEN && tsk->state != TCP_CLOSED){// avoid when tcp connect close, the listen would send useless ack
-			// keep alive
+		if(less_or_equal_32b(cb->seq_end, tsk->rcv_nxt)){
 			log(INFO, "keep alive");
-			flags = TCP_ACK; 
+			flags = TCP_ACK; // keep alive
+		}else{
+			if(tcp_recv_ofo_buffer_add_packet(tsk, cb)){
+				flags = TCP_ACK;
+			}
 		}
-	}else if(less_than_32b(tsk->rcv_nxt, cb->seq)){
-		// out of order
-		if(tsk->state != TCP_LISTEN && tsk->state != TCP_CLOSED){// avoid when tcp connect close, the listen would send useless ack
-			flags = TCP_ACK;
-		}
-	}else {
-		log(ERROR, "seq: %u, seq_end: %u, rcv_nxt: %u", cb->seq, cb->seq_end, tsk->rcv_nxt);
-		log(ERROR, "should not reach here");
 	}
 	tsk->sk_sip = cb->daddr;
 	tsk->sk_sport = cb->dport;
 	tsk->sk_dip = cb->saddr;
 	tsk->sk_dport = cb->sport;
-	// pthread_mutex_lock(&tsk->rcv_buf_lock);
-	// tsk->rcv_wnd = ring_buffer_free(tsk->rcv_buf);
-	// pthread_mutex_unlock(&tsk->rcv_buf_lock);
-	// // NOTE: important!
-	// }
 	if(flags)
 		tcp_send_control_packet(tsk, flags);
 }
