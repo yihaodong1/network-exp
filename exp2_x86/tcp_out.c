@@ -127,10 +127,28 @@ void tcp_send_control_packet(struct tcp_sock *tsk, u8 flags)
 	struct tcphdr *tcp = (struct tcphdr *)((char *)ip + IP_BASE_HDR_SIZE);
 
 	u16 tot_len = IP_BASE_HDR_SIZE + TCP_BASE_HDR_SIZE;
+	if(flags & TCP_SYN){
+		pkt_size = ETHER_HDR_SIZE + IP_BASE_HDR_SIZE + TCP_BASE_HDR_SIZE + 4;// for mss
+		free(packet);
+		packet = malloc(pkt_size);
+		char *mss = packet + pkt_size - 4;
+		memset(mss, 0x02, 1);
+		memset(mss+1, 0x04, 1);
+		memset(mss+2, 0x05, 1);
+		memset(mss+3, 0xb4, 1);
+		ip = packet_to_ip_hdr(packet);
+		tcp = (struct tcphdr *)((char *)ip + IP_BASE_HDR_SIZE);
+
+		tot_len = IP_BASE_HDR_SIZE + TCP_BASE_HDR_SIZE + 4;
+
+	}
 
 	ip_init_hdr(ip, tsk->sk_sip, tsk->sk_dip, tot_len, IPPROTO_TCP);
 	tcp_init_hdr(tcp, tsk->sk_sport, tsk->sk_dport, tsk->snd_nxt, \
 			tsk->rcv_nxt, flags, tsk->rcv_wnd);
+	if (flags & TCP_SYN) {
+		tcp->off = 6;
+	}
 
 	tcp->checksum = tcp_checksum(ip, tcp);
 

@@ -95,6 +95,7 @@ void tcp_process(struct tcp_sock *tsk, struct tcp_cb *cb, char *packet)
 	if(cb->flags & TCP_ACK){
 		tcp_update_window_safe(tsk, cb);
 		tcp_update_send_buffer(tsk, cb->ack);
+		tcp_update_retrans_timer(tsk);
 		if(tsk->state == TCP_SYN_RECV){
 			if(!tcp_sock_accept_queue_full(tsk->parent)){
 				// establish and close the retrans of syn
@@ -124,8 +125,6 @@ void tcp_process(struct tcp_sock *tsk, struct tcp_cb *cb, char *packet)
 			pthread_mutex_unlock(&timer_list_lock);
 
 			tcp_set_state(tsk, TCP_FIN_WAIT_2);
-		}else if(tsk->state == TCP_ESTABLISHED){
-			tcp_update_retrans_timer(tsk);
 		}
 	}
 	
@@ -136,7 +135,10 @@ void tcp_process(struct tcp_sock *tsk, struct tcp_cb *cb, char *packet)
 			tcp_set_state(tsk, TCP_CLOSE_WAIT);
 			// NOTICE: at the end of trans, wake up wait_recv and close
 			wake_up(tsk->wait_recv);
-			tsk->rcv_nxt += 1;
+			if(cb->payload && cb->pl_len){
+				;
+			}else
+				tsk->rcv_nxt += 1;
 		}
 		else if(tsk->state == TCP_FIN_WAIT_2){
 			tcp_set_timewait_timer(tsk);
@@ -151,7 +153,7 @@ void tcp_process(struct tcp_sock *tsk, struct tcp_cb *cb, char *packet)
 			flags = TCP_ACK; // keep alive
 		}else{
 			if(tcp_recv_ofo_buffer_add_packet(tsk, cb)){
-				flags = TCP_ACK;
+				flags = TCP_ACK | TCP_PSH;
 			}
 		}
 	}
