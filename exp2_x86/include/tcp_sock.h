@@ -14,6 +14,12 @@
 #define PORT_MIN	12345
 #define PORT_MAX	23456
 
+#define TCP_MSS (ETH_FRAME_LEN - ETHER_HDR_SIZE - IP_BASE_HDR_SIZE - TCP_BASE_HDR_SIZE)
+enum{
+	CONG_SLOWSTART,
+	CONG_CONGAVOID,
+	CONG_FASTRECOVERY,
+};
 struct sock_addr {
 	u32 ip;
 	u16 port;
@@ -75,6 +81,7 @@ struct tcp_sock {
 	struct synch_wait *wait_accept;
 	struct synch_wait *wait_recv;
 	struct synch_wait *wait_send;
+	struct synch_wait *wait_record;
 
 	// receiving buffer
 	struct ring_buffer *rcv_buf;
@@ -113,6 +120,13 @@ struct tcp_sock {
 
 	// slow start threshold
 	u32 ssthresh;
+	
+	// congestion state
+	u8 c_state;
+
+	// duplicate ack
+	u32 dupACKcount;
+
 	// 保护snd_una等核心参数
 	// 收包时：在tcp_process调用之前上锁，之后解锁。这样整个收包过程对socket参数的更改都是安全的。
 	// 发包时：在tcp_send_packet调用之前上锁，之后解锁。这里由于每个人实现不一样，

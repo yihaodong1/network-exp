@@ -127,6 +127,23 @@ void tcp_scan_timer_list()
 	struct tcp_timer *pos, *q;
 	struct tcp_sock *tsk;
 	list_for_each_entry_safe(pos, q, &timer_list, list) {
+		switch(pos->type){
+			case 0:// time-wait
+				tsk = timewait_to_tcp_sock(pos);
+				break;
+			case 1:// retrans
+				tsk = retranstimer_to_tcp_sock(pos);
+				break;
+			case 2:// persist
+				tsk = persisttimer_to_tcp_sock(pos);
+				break;
+		}
+		if(tsk->ref_cnt == 1){
+			// already release in other place, so release here;
+			list_delete_entry(&pos->list);
+			free_tcp_sock(tsk);
+			continue;
+		}
 		if(pos->enable){
 			pos->timeout -= TCP_TIMER_SCAN_INTERVAL;
 			if(pos->timeout <= 0){
@@ -142,6 +159,10 @@ void tcp_scan_timer_list()
 					case 1:// retrans
 					 	tsk = retranstimer_to_tcp_sock(pos);
 						pos->retrans_count++;
+						tsk->ssthresh = tsk->cwnd / 2;
+						tsk->cwnd = TCP_MSS;
+						tsk->dupACKcount = 0;
+						tsk->c_state = CONG_SLOWSTART;
 						if(pos->retrans_count > TCP_RETRANS_MAX_COUNT) {
 							wake_up(tsk->wait_accept);
 							wake_up(tsk->wait_send);
@@ -158,7 +179,9 @@ void tcp_scan_timer_list()
 							pos->rto *= 2;
 							pos->timeout = pos->rto;
 						}
-						log(INFO, "retrans timer timeout, retrans_count=%d, rto=%u", pos->retrans_count, pos->rto);
+						log(INFO, "retrans timer timeout, retrans_count=%d, rto=%u;\n \
+							ssthresh:%u, cwnd: %u, switch to CONG_SLOWSTART", 
+							pos->retrans_count, pos->rto, tsk->ssthresh, tsk->cwnd);
 						break;
 					case 2:// persist
 						pos->timeout = TCP_RETRANS_INTERVAL_INITIAL;

@@ -64,10 +64,14 @@ struct tcp_sock *alloc_tcp_sock()
 	tsk->wait_accept = alloc_wait_struct();
 	tsk->wait_recv = alloc_wait_struct();
 	tsk->wait_send = alloc_wait_struct();
+	tsk->wait_record = alloc_wait_struct();
 
 	pthread_mutex_init(&tsk->sk_lock, NULL);
 	pthread_mutex_init(&tsk->rcv_buf_lock, NULL);
 	pthread_mutex_init(&tsk->send_buf_lock, NULL);
+
+	tsk->cwnd = TCP_MSS;
+	tsk->ssthresh = 64*1024;
 
 	return tsk;
 }
@@ -284,6 +288,7 @@ int tcp_sock_connect(struct tcp_sock *tsk, struct sock_addr *skaddr)
 	tsk->sk_dport = port; // remote port
 	tsk->iss = tcp_new_iss();
 	tsk->snd_nxt = tsk->iss;
+	tsk->snd_una = tsk->iss;
 	tcp_set_state(tsk, TCP_SYN_SENT);
 	ret = tcp_hash(tsk);
 	if(ret < 0){
@@ -423,7 +428,6 @@ int tcp_sock_write(struct tcp_sock *tsk, char *buf, int len)
 }
 
 
-#define TCP_MSS (ETH_FRAME_LEN - ETHER_HDR_SIZE - IP_BASE_HDR_SIZE - TCP_BASE_HDR_SIZE)
 
 // 使用tsk->snd_una, tsk->snd_wnd, tsk->snd_nxt计算剩余窗口大小，如果大于TCP_MSS，
 // 则返回1，否则返回0
@@ -433,7 +437,7 @@ int tcp_tx_window_test(struct tcp_sock *tsk)
 	u32 snd_wnd = tsk->snd_wnd;
 	u32 snd_nxt = tsk->snd_nxt;
 
-	if (snd_wnd + snd_una - snd_nxt > TCP_MSS){
+	if (snd_wnd + snd_una > TCP_MSS + snd_nxt ){
 		log(INFO, "tcp_tx_window_test: snd_wnd=%u, snd_una=%u, snd_nxt=%u, win size=%u",
 			snd_wnd, snd_una, snd_nxt, snd_wnd + snd_una - snd_nxt);
 		return 1;

@@ -6,3 +6,14 @@ public/
 .cache/
 *.o
 *.pcap
+*.log
+*.txt
+*.dat
+compile_commands.json
+http-server
+tcp_stack
+*.py
+!plot_cwnd.py
+*.png
+*.pyc
+*.so
