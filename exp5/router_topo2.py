@@ -5,7 +5,7 @@ from mininet.topo import Topo
 from mininet.net import Mininet
 from mininet.cli import CLI
 
-script_deps = [ 'ethtool', 'arptables', 'iptables', 'traceroute' ]
+script_deps = [ 'ethtool', 'arptables-nft', 'iptables', 'tracepath' ]
 
 def check_scripts():
     dir = os.path.abspath(os.path.dirname(sys.argv[0]))

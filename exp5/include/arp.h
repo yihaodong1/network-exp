@@ -30,6 +30,7 @@ static inline struct ether_arp *packet_to_ether_arp(const char *packet)
 
 void handle_arp_packet(iface_info_t *info, char *packet, int len);
 void arp_send_request(iface_info_t *iface, u32 dst_ip);
+void arp_send_reply(iface_info_t *iface, struct ether_arp *req_hdr);
 void iface_send_packet_by_arp(iface_info_t *iface, u32 dst_ip, char *packet, int len);
 
 #endif
